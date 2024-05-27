@@ -1,0 +1,123 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <mpi.h>
+
+
+typedef struct {
+    double x, y, z;
+} Point;
+
+
+double distance(Point p1, Point p2) {
+    return sqrt((p1.x - p2.x) * (p1.x - p2.x) +
+                (p1.y - p2.y) * (p1.y - p2.y) +
+                (p1.z - p2.z) * (p1.z - p2.z));
+}
+
+
+void ritter(Point *points, int num_points, Point *center, double *radius) {
+    if (num_points == 0) return;
+
+    Point p1 = points[0];
+    Point p2 = points[0];
+    double max_dist = 0;
+
+    for (int i = 0; i < num_points; i++) {
+        double d = distance(p1, points[i]);
+        if (d > max_dist) {
+            max_dist = d;
+            p2 = points[i];
+        }
+    }
+
+    Point p3 = p2;
+    max_dist = 0;
+    for (int i = 0; i < num_points; i++) {
+        double d = distance(p2, points[i]);
+        if (d > max_dist) {
+            max_dist = d;
+            p3 = points[i];
+        }
+    }
+
+    *center = (Point){(p2.x + p3.x) / 2, (p2.y + p3.y) / 2, (p2.z + p3.z) / 2};
+    *radius = distance(p2, p3) / 2;
+
+    for (int i = 0; i < num_points; i++) {
+        double d = distance(*center, points[i]);
+        if (d > *radius) {
+            double new_radius = (*radius + d) / 2;
+            double extend_ratio = (new_radius - *radius) / d;
+            center->x += (points[i].x - center->x) * extend_ratio;
+            center->y += (points[i].y - center->y) * extend_ratio;
+            center->z += (points[i].z - center->z) * extend_ratio;
+            *radius = new_radius;
+        }
+    }
+}
+
+int main(int argc, char **argv) {
+    int rank, size;
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    int total_points = 10000000;
+    int points_per_process = total_points / size;
+
+    Point *points = (Point*) malloc(points_per_process * sizeof(Point));
+
+    FILE *file;
+    double start_time = MPI_Wtime();
+    if (rank == 0) {
+        file = fopen("points.txt", "r");
+        if (file == NULL) {
+            perror("Error open file");
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        }
+    }
+
+    for (int i = 0; i < points_per_process; i++) {
+        if (rank == 0) {
+            fscanf(file, "%lf %lf %lf", &points[i].x, &points[i].y, &points[i].z);
+        }
+        MPI_Bcast(&points[i], 3, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    }
+    if (rank == 0) fclose(file);
+
+    Point local_center;
+    double local_radius;
+    ritter(points, points_per_process, &local_center, &local_radius);
+
+    Point global_center;
+    double global_radius = 0;
+    if (rank != 0) {
+        MPI_Send(&local_center, 3, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
+        MPI_Send(&local_radius, 1, MPI_DOUBLE, 0, 1, MPI_COMM_WORLD);
+    } else {
+        for (int i = 1; i < size; i++) {
+            Point temp_center;
+            double temp_radius;
+            MPI_Recv(&temp_center, 3, MPI_DOUBLE, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Recv(&temp_radius, 1, MPI_DOUBLE, i, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            global_center.x += temp_center.x;
+            global_center.y += temp_center.y;
+            global_center.z += temp_center.z;
+            if (temp_radius > global_radius) {
+                global_radius = temp_radius;
+            }
+        }
+        global_center.x /= size;
+        global_center.y /= size;
+        global_center.z /= size;
+        printf("Global Bounding Sphere: \nCenter (%f, %f, %f), \nRadius %f\n", global_center.x, global_center.y, global_center.z, global_radius);
+        double end_time = MPI_Wtime();
+        printf("Total time taken: %f seconds\n", end_time - start_time);
+    }
+
+
+    free(points);
+    MPI_Finalize();
+    return 0;
+}
